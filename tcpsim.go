@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"math/rand"
 	"os"
 	"sort"
 	"strings"
@@ -16,7 +17,7 @@ type Msg struct {
 }
 
 // var connection int = 0
-var msg = make(chan Msg)
+var msg = make(chan Msg, 100)
 
 func main() {
 	fmt.Println("Send some messages to the server (you have 30 seconds)")
@@ -27,8 +28,15 @@ func main() {
 	time.Sleep(30 * time.Second)
 }
 
-func middleLayer[channel chan int | chan Msg](channel) {
-
+func middleLayer(channel chan Msg, m Msg) {
+	rand.Seed(time.Now().UnixNano())
+	v := rand.Intn(5)
+	if v == 1 {
+		fmt.Println("Something broke")
+	} else {
+		channel <- m
+		fmt.Println("message sent")
+	}
 }
 
 func client(port chan int) {
@@ -51,21 +59,22 @@ func client(port chan int) {
 				serPing++
 				port <- serPing
 				//DATA TRANSFER
+			outer:
 				for {
-					for i := 0; i < size; i++ {
-						m := Msg{message[i], order, size}
-						msg <- m
-						order++
+					select {
+					case <-port:
+						break outer
+					default:
+						for i := 0; i < size; i++ {
+							m := Msg{message[i], order, size}
+							middleLayer(msg, m)
+							order++
+						}
+						time.Sleep(100 * time.Millisecond)
 					}
-					if <-port == 0 {
-						break
-					}
-					time.Sleep(time.Second)
 				}
 			}
 		}
-		order = 0
-		size = 0
 	}
 }
 
@@ -77,26 +86,43 @@ func server(port chan int) {
 		if <-port == cliPing {
 			cliPing++
 			port <- cliPing
-			port <- serPing //Here it wouldnt work irl
+			port <- serPing
 			if <-port == serPing+1 {
 				serPing++
 				//DATA TRANSFER
+			outer:
 				for {
-					first := <-msg
+					time.Sleep(10 * time.Millisecond)
+					select {
+					case <-msg:
+						finalMsg = append(finalMsg, <-msg)
+					default:
+						port <- 0
+						break outer
+					}
+
+					/*time.Sleep(10 * time.Millisecond)
+					if len(msg) == 0 {
+						fmt.Println("channel is empty")
+
+					}
+					finalMsg = append(finalMsg, <-msg)
+					/*first := <-msg
 					finalMsg = make([]Msg, first.size)
 					finalMsg[0] = first
 					for i := 1; i < first.size; i++ {
 						finalMsg[i] = <-msg
-					}
-					if finalMsg[first.size-1].size == first.size {
+					}*/
+					/*if finalMsg[first.size-1].size == first.size {
 						port <- 0
 						break
-					}
+					}*/
 				}
 				sort.Slice(finalMsg, func(p, q int) bool {
 					return finalMsg[p].order < finalMsg[q].order
 				})
 				fmt.Println(finalMsg)
+				finalMsg = []Msg{}
 			}
 		}
 	}
