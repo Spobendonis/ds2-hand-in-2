@@ -15,7 +15,7 @@ A message comes with a sequence-number, describing the order that the message is
 
 ## How do you handle message loss?
 
-Our implementation expects messages to arrive within 500 ms. If the client does not recieve an acknowledgement within this timeout, it will assume that either the server did not recieve a message, or that the ACK-message was lost. Thus, the message will be sent from the client again.
+Our implementation expects messages to arrive within 300 ms. If the client does not recieve an acknowledgement within this time window, it will assume that either the server did not recieve a message, or that the ACK-message was lost. Thus, the message will be sent from the client again.
 
 ## Why is the 3-way handshake important?
 
