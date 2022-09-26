@@ -35,134 +35,241 @@ type TCP_header struct {
 }
 
 type Msg struct {
-	msg   string
-	order int
-	size  int
+	msg string
+	end bool
 }
 
 func main() {
 	fmt.Println("Send some messages to the server (you have 30 seconds)")
 
-	port := make(chan IP_packet)
-	go client(port)
-	go server(port)
-	time.Sleep(30 * time.Second)
+	clientToServer := make(chan IP_packet)
+	serverToClient := make(chan IP_packet)
+	go client(serverToClient, clientToServer, 1)
+	go server(clientToServer, serverToClient, 2)
+	time.Sleep(50 * time.Second)
 }
 
-func client(port chan IP_packet) {
+func client(in chan IP_packet, out chan IP_packet, address int) {
+
 	bio := bufio.NewReader(os.Stdin)
-	var cliPing int = 0
-	var serPing int = 0
+
+	messageQueue := make([]Msg, 0)
+
+	var currentPacket IP_packet
+
+	seq := 0
+	ack := 0
+
+	waitForACK := false
+	waitForSYNACK := false
+	closeConnection := false
+	createConnection := true
+
+	line, err := bio.ReadString('\n')
+
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	messageSplit := strings.Split(strings.Join(strings.Fields(line), " "), " ")
+	for _, element := range messageSplit {
+		messageQueue = append(messageQueue, Msg{element, false})
+	}
+	messageQueue = append(messageQueue, Msg{"", true})
+
+listenerLoop:
 	for {
-		var order int = 0
-		var size int = 0
-		line, err := bio.ReadString('\n')
-		if err != nil {
-			fmt.Println(err)
+
+		time.Sleep(500)
+
+		if createConnection {
+
+			synMessage := IP_packet{IP_header{address, 2}, IP_data{TCP_header{true, false, false, 0, seq, 1, 1}, Msg{"", false}}}
+
+			currentPacket = synMessage
+			waitForSYNACK = true
+			createConnection = false
+
+			fmt.Println("Client sent SYN with seq", seq)
+
+			out <- synMessage
 		}
-		message := strings.Split(strings.Join(strings.Fields(line), " "), " ")
-		size = len(message)
 
-		synMessage := IP_packet{IP_header{1, 2}, IP_data{TCP_header{true, false, false, -1, cliPing, 1, 1}, Msg{"", 0, 0}}}
+		select {
+		case packet := <-in:
 
-		port <- synMessage
-		answer := <-port
+			tcpHeader := packet.data.tcpHeader
 
-		if answer.data.tcpHeader.ACKNumber == cliPing+1 {
+			// Switch statements for ports
+			switch tcpHeader.destinationPort {
+			case 1:
 
-			cliPing++
-			serPing = answer.data.tcpHeader.sequenceNumber + 1
+				if waitForSYNACK {
 
-			ackMessage := IP_packet{IP_header{1, 2}, IP_data{TCP_header{false, true, false, serPing, cliPing, 1, 1}, Msg{"", 0, 0}}}
-			port <- ackMessage
+					fmt.Println("Client recieved SYN ACK with seq", tcpHeader.sequenceNumber, " ack", tcpHeader.ACKNumber)
 
-			//DATA TRANSFER
-			for i := 0; i < size; i++ {
-				data := Msg{message[i], order, size}
-				message := IP_packet{IP_header{1, 2}, IP_data{TCP_header{false, false, false, -1, -1, 1, 1}, data}}
-				port <- message
-				order++
+					if (!tcpHeader.ACK) || (!tcpHeader.SYN) || (tcpHeader.FIN) || (tcpHeader.ACKNumber != seq+1) {
+						fmt.Println("Client recieved unexpected packet")
+						fmt.Println(packet.data.tcpHeader)
+						continue listenerLoop
+					}
+
+					seq++
+
+					ack = tcpHeader.sequenceNumber + 1
+
+					waitForSYNACK = false
+					waitForACK = true
+
+					fmt.Println("Client sent ACK with seq", seq, "ack", ack)
+
+					currentPacket := IP_packet{IP_header{address, packet.header.sourceAddress}, IP_data{TCP_header{false, true, false, ack, seq, 1, tcpHeader.sourcePort}, Msg{"", false}}}
+
+					out <- currentPacket
+
+				} else if waitForACK {
+
+					fmt.Println("Client recieved ACK with ack", tcpHeader.ACKNumber)
+
+					if (!tcpHeader.ACK) || (tcpHeader.SYN) || (tcpHeader.FIN) || (tcpHeader.ACKNumber != seq+1) {
+						fmt.Println("Client recieved unexpected packet")
+						fmt.Println(packet.data.tcpHeader)
+						continue listenerLoop
+					}
+
+					if closeConnection {
+						waitForACK = false
+
+						continue listenerLoop
+					}
+
+					seq++
+
+					if len(messageQueue) != 0 {
+
+						currentPacket = IP_packet{IP_header{address, packet.header.sourceAddress}, IP_data{TCP_header{false, false, false, 0, seq, 1, tcpHeader.sourcePort}, messageQueue[0]}}
+
+						messageQueue = messageQueue[1:]
+
+						fmt.Println("Client sent next message:", currentPacket.data.data.msg, " with seq", currentPacket.data.tcpHeader.sequenceNumber)
+
+					} else {
+
+						currentPacket = IP_packet{IP_header{address, packet.header.sourceAddress}, IP_data{TCP_header{false, false, true, 0, seq, 1, tcpHeader.sourcePort}, Msg{"", false}}}
+
+						fmt.Println("Client sent FIN with seq", seq)
+
+						closeConnection = true
+
+					}
+
+					out <- currentPacket
+
+				} else if closeConnection {
+
+					if (tcpHeader.ACK) || (tcpHeader.SYN) || (!tcpHeader.FIN) {
+						fmt.Println("Client recieved unexpected packet")
+						fmt.Println(packet.data.tcpHeader)
+						continue listenerLoop
+					}
+
+					currentPacket = IP_packet{IP_header{address, packet.header.sourceAddress}, IP_data{TCP_header{false, true, false, tcpHeader.sequenceNumber + 1, 0, 1, tcpHeader.sourcePort}, Msg{"", false}}}
+
+					fmt.Println("Client sent ACK with seq", seq)
+
+					closeConnection = false
+
+				}
+
 			}
-			time.Sleep(time.Second)
-
-			finMessage := IP_packet{IP_header{1, 2}, IP_data{TCP_header{false, false, true, -1, -1, 1, 1}, Msg{"", 0, 0}}}
-			port <- finMessage
-
-			serverAckMessage := <-port
-
-			if serverAckMessage.data.tcpHeader.ACK != true {
-				fmt.Println("ERROR")
-			}
-
-			finalFinMessage := <-port
-
-			if finalFinMessage.data.tcpHeader.FIN != true {
-				fmt.Println("ERROR")
-			}
-
-			finalAckMessage := IP_packet{IP_header{1, 2}, IP_data{TCP_header{false, true, false, -1, -1, 1, 1}, Msg{"", 0, 0}}}
-			port <- finalAckMessage
+		default:
+			out <- currentPacket
 		}
-		order = 0
-		size = 0
+
 	}
 }
 
-func server(port chan IP_packet) {
-	var cliPing int = 0
-	var serPing int = 0
-	var fullMessage []Msg
+type MsgWithSequence struct {
+	msg      string
+	sequence int
+}
+
+func server(in chan IP_packet, out chan IP_packet, address int) {
+
+	messages := make([]MsgWithSequence, 0)
+
+	var currentPacket IP_packet
+
+	connected := false
+
+	seq := 0
+
 	for {
 
-		synMessage := <-port
+		time.Sleep(500)
 
-		cliPing = synMessage.data.tcpHeader.sequenceNumber
-		cliPing++
+		select {
+		case packet := <-in:
 
-		synAckMessage := IP_packet{IP_header{2, 1}, IP_data{TCP_header{true, true, false, cliPing, serPing, 1, 1}, Msg{"", 0, 0}}}
-		port <- synAckMessage
+			tcpHeader := packet.data.tcpHeader
 
-		ackMessage := <-port
+			switch tcpHeader.destinationPort {
+			case 1:
 
-		if ackMessage.data.tcpHeader.sequenceNumber == cliPing && ackMessage.data.tcpHeader.ACKNumber == serPing+1 {
+				if (tcpHeader.SYN) && (!tcpHeader.ACK) && (!tcpHeader.FIN) {
 
-			//DATA TRANSFER
-			for {
-				message := <-port
-				fullMessage = make([]Msg, message.data.data.size)
-				fullMessage[0] = message.data.data
-				for i := 1; i < message.data.data.size; i++ {
-					newMessage := <-port
-					fullMessage[i] = newMessage.data.data
+					currentPacket = IP_packet{IP_header{address, packet.header.sourceAddress}, IP_data{TCP_header{true, true, false, tcpHeader.sequenceNumber + 1, seq, 1, tcpHeader.sourcePort}, Msg{"", false}}}
+
+					out <- currentPacket
+
+				} else if (tcpHeader.ACK) && (!tcpHeader.FIN) {
+
+					if tcpHeader.ACKNumber != seq+1 {
+						// ERROR
+					}
+
+					connected = !connected
+
+					currentPacket = IP_packet{IP_header{address, packet.header.sourceAddress}, IP_data{TCP_header{false, true, false, tcpHeader.sequenceNumber + 1, 0, 1, tcpHeader.sourcePort}, Msg{"", false}}}
+
+					out <- currentPacket
+
+				} else if tcpHeader.FIN {
+
+					currentPacket = IP_packet{IP_header{address, packet.header.sourceAddress}, IP_data{TCP_header{false, true, false, tcpHeader.sequenceNumber + 1, 0, 1, tcpHeader.sourcePort}, Msg{"", false}}}
+
+					out <- currentPacket
+
+					currentPacket = IP_packet{IP_header{address, packet.header.sourceAddress}, IP_data{TCP_header{false, false, true, 0, seq, 1, tcpHeader.sourcePort}, Msg{"", false}}}
+
+					out <- currentPacket
+
+				} else if connected {
+
+					if packet.data.data.end {
+
+						sort.Slice(messages, func(p, q int) bool {
+							return messages[p].sequence < messages[q].sequence
+						})
+						fmt.Println(messages)
+
+					} else {
+						messages = append(messages, MsgWithSequence{packet.data.data.msg, tcpHeader.sequenceNumber})
+
+					}
+
+					currentPacket = IP_packet{IP_header{address, packet.header.sourceAddress}, IP_data{TCP_header{false, true, false, tcpHeader.sequenceNumber + 1, 0, 1, tcpHeader.sourcePort}, Msg{"", false}}}
+
+					out <- currentPacket
+
 				}
-				if fullMessage[message.data.data.size-1].size == message.data.data.size {
-					// port <- 0
-					break
-				}
-			}
-			sort.Slice(fullMessage, func(p, q int) bool {
-				return fullMessage[p].order < fullMessage[q].order
-			})
-			fmt.Println(fullMessage)
 
-			fromClientFinMessage := <-port
-			if fromClientFinMessage.data.tcpHeader.FIN != true {
-				fmt.Println("Error")
 			}
 
-			toClientAckMessage := IP_packet{IP_header{2, 1}, IP_data{TCP_header{false, true, false, -1, -1, 1, 1}, Msg{"", 0, 0}}}
-			port <- toClientAckMessage
-
-			toClientFintMessage := IP_packet{IP_header{2, 1}, IP_data{TCP_header{false, false, true, -1, -1, 1, 1}, Msg{"", 0, 0}}}
-			port <- toClientFintMessage
-
-			fromClientAckMessage := <-port
-			if fromClientAckMessage.data.tcpHeader.ACK != true {
-				fmt.Println("Error")
-			} else {
-				fmt.Println("Connection closed")
-			}
+		default:
+			// ERROR
 
 		}
 	}
+
 }
